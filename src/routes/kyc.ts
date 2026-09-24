@@ -24,9 +24,9 @@ function last4Digits(value: string): string {
 interface KycBody {
   name?: string;
   email?: string;
-  dob?: string;       // whatever format the form uses — login must send this back identically
+  dob?: string;
   pan?: string;
-  aadhaar?: string;    // full number accepted here, but only last 4 ever get stored
+  aadhaar?: string;
   mobile?: string;
 }
 
