@@ -63,6 +63,7 @@ body {
 }
 .topbar .mark svg { width: 15px; height: 15px; }
 .topbar .word { font-weight: 800; font-size: 17px; letter-spacing: -0.02em; }
+.topbar .word-accent { color: var(--accent-deep); font-weight: 700; }
 
 .screen { padding: 24px 20px 8px; }
 
