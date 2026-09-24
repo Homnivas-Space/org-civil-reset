@@ -1,9 +1,13 @@
 import { Hono } from "hono";
 import { hashPanDob } from "../lib/pan";
+import { createOtp } from "../lib/otp";
+import { sendOtpEmail } from "../lib/email-otp";
 
 type Bindings = {
   DB: D1Database;
   PAN_PEPPER: string;
+  OTP_KV: KVNamespace;
+  RESEND_API_KEY: string;
 };
 
 const kyc = new Hono<{ Bindings: Bindings }>();
@@ -27,9 +31,9 @@ interface KycBody {
 }
 
 // Typed-field intake only — no document photos, no selfie, no payment.
-// Those are separate, undecided pieces (image handling + bank/ops handoff,
-// payment gateway choice) — this just creates the applicant record so
-// login has something to find.
+// On success, immediately sends the login OTP so a new applicant flows
+// straight into verification instead of re-entering PAN+DOB right after
+// just submitting it.
 kyc.post("/submit", async (c) => {
   const body = await c.req.json<KycBody>();
   const { name, email, dob, pan, aadhaar, mobile } = body;
@@ -39,6 +43,7 @@ kyc.post("/submit", async (c) => {
   }
 
   const cleanPan = pan.trim().toUpperCase();
+  const cleanEmail = email.trim().toLowerCase();
   const panDobHash = await hashPanDob(cleanPan, dob, c.env.PAN_PEPPER);
   const applicantId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
@@ -54,7 +59,7 @@ kyc.post("/submit", async (c) => {
         panDobHash,
         maskPan(cleanPan),
         name.trim(),
-        email.trim().toLowerCase(),
+        cleanEmail,
         mobile?.trim() ?? null,
         aadhaar ? last4Digits(aadhaar) : null,
         now
@@ -66,8 +71,6 @@ kyc.post("/submit", async (c) => {
       ).bind(crypto.randomUUID(), applicantId, now, now),
     ]);
   } catch (err) {
-    // Most likely cause: UNIQUE constraint on pan_dob_hash or email —
-    // someone submitting the same PAN+DOB or email twice.
     console.error(err);
     return c.json(
       { error: "An application already exists for this PAN or email" },
@@ -75,7 +78,16 @@ kyc.post("/submit", async (c) => {
     );
   }
 
-  return c.json({ ok: true, applicantId });
+  const otp = await createOtp(c.env.OTP_KV, applicantId);
+  const sendResult = await sendOtpEmail(c.env, cleanEmail, otp);
+  if (!sendResult.ok) {
+    console.error(sendResult.error);
+    // The applicant record exists either way — don't fail signup over a
+    // delivery hiccup, the frontend can offer "resend code."
+    return c.json({ ok: true, applicantId, otpSent: false });
+  }
+
+  return c.json({ ok: true, applicantId, otpSent: true });
 });
 
 export default kyc;

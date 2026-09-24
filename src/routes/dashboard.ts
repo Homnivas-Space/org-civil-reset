@@ -5,16 +5,45 @@ type Bindings = { DB: D1Database; JWT_SECRET: string };
 type Variables = { applicantId: string };
 
 const dashboard = new Hono<{ Bindings: Bindings; Variables: Variables }>();
-
 dashboard.use("*", requireAuth);
 
-// NOT IMPLEMENTED — CIBIL summary, income/EMI, and the 4-stage progress
-// tracker (account_opened -> payment_done -> card_received -> active)
-// haven't been designed yet. requireAuth is wired so the pattern for every
-// protected route going forward is already correct.
 dashboard.get("/", async (c) => {
   const applicantId = c.get("applicantId");
-  return c.json({ error: "Not implemented yet", applicantId }, 501);
+
+  const applicant = await c.env.DB.prepare(
+    "SELECT name, email, pan_masked FROM applicants WHERE id = ?"
+  )
+    .bind(applicantId)
+    .first();
+
+  if (!applicant) {
+    return c.json({ error: "Applicant not found" }, 404);
+  }
+
+  const cibilReport = await c.env.DB.prepare(
+    "SELECT * FROM cibil_reports WHERE applicant_id = ? ORDER BY parsed_at DESC LIMIT 1"
+  )
+    .bind(applicantId)
+    .first();
+
+  const income = await c.env.DB.prepare(
+    "SELECT * FROM income_declarations WHERE applicant_id = ? ORDER BY created_at DESC LIMIT 1"
+  )
+    .bind(applicantId)
+    .first();
+
+  const application = await c.env.DB.prepare(
+    "SELECT * FROM applications WHERE applicant_id = ? ORDER BY created_at DESC LIMIT 1"
+  )
+    .bind(applicantId)
+    .first();
+
+  return c.json({
+    applicant,
+    cibilReport: cibilReport ?? null,
+    income: income ?? null,
+    application: application ?? null,
+  });
 });
 
 export default dashboard;
