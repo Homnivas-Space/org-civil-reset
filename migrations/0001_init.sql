@@ -1,89 +1,66 @@
--- Homnivas Card PWA — D1 schema (SQLite dialect)
--- IF NOT EXISTS on every statement on purpose: this file is meant to be
--- safe to re-run on every deploy (Cloudflare's Git-integration build step
--- runs it automatically each time), not just once by hand.
-
-CREATE TABLE IF NOT EXISTS agents (
+-- Applicant record, written at KYC-form-submit time.
+-- pan_dob_hash is HMAC(pan+dob) from src/lib/pan.ts — the raw PAN and DOB
+-- are never stored here, only the masked display version of the PAN.
+CREATE TABLE applicants (
   id TEXT PRIMARY KEY,
+  pan_dob_hash TEXT NOT NULL UNIQUE,
+  pan_masked TEXT NOT NULL,        -- e.g. "XXXXX1234F", display only
   name TEXT NOT NULL,
-  phone TEXT NOT NULL UNIQUE,
-  pin_hash TEXT NOT NULL,
-  pin_salt TEXT NOT NULL,
-  active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  email TEXT NOT NULL UNIQUE,      -- login OTP goes here
+  mobile TEXT,                     -- optional, for RM/human contact only — not used for OTP
+  aadhaar_last4 TEXT,              -- masked; never store the full number
+  created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS agent_sessions (
-  token TEXT PRIMARY KEY,
-  agent_id TEXT NOT NULL REFERENCES agents(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  expires_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_agent_sessions_agent ON agent_sessions(agent_id);
+CREATE INDEX idx_applicants_email ON applicants (email);
 
-CREATE TABLE IF NOT EXISTS leads (
+-- One row per parsed CIBIL pull. Populated by the (not-yet-built) parse
+-- step — the raw PDF is never written here, only what got extracted.
+CREATE TABLE cibil_reports (
   id TEXT PRIMARY KEY,
-  agent_id TEXT NOT NULL REFERENCES agents(id),
-  name TEXT,
-  phone TEXT NOT NULL,
-  access_token TEXT NOT NULL UNIQUE,
-  status TEXT NOT NULL DEFAULT 'link_sent',
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_seen_at TEXT
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  report_date TEXT,                 -- date the bureau generated the report
+  score INTEGER,
+  active_loans INTEGER,
+  overdue_count INTEGER,
+  inquiries_last_6m INTEGER,
+  has_writeoff_or_settled INTEGER,  -- 0/1
+  ai_summary TEXT,
+  parsed_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_leads_access_token ON leads(access_token);
-CREATE INDEX IF NOT EXISTS idx_leads_agent ON leads(agent_id);
 
-CREATE TABLE IF NOT EXISTS lead_sessions (
-  token TEXT PRIMARY KEY,
-  lead_id TEXT NOT NULL REFERENCES leads(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  expires_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_lead_sessions_lead ON lead_sessions(lead_id);
-
-CREATE TABLE IF NOT EXISTS applications (
+CREATE TABLE income_declarations (
   id TEXT PRIMARY KEY,
-  lead_id TEXT NOT NULL UNIQUE REFERENCES leads(id),
-  full_name TEXT,
-  dob TEXT,
-  pan_number TEXT,
-  address TEXT,
-  pincode TEXT,
-  employment_type TEXT,
-  monthly_income_band TEXT,
-  submitted_at TEXT
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  monthly_income INTEGER,
+  monthly_emi INTEGER,
+  source TEXT NOT NULL,   -- 'manual' | 'statement'
+  created_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS kyc_documents (
+-- Status + the ₹16,000 payment split from the landing page:
+-- ₹10,000 capital allocation (becomes the card's usable limit) +
+-- ₹6,000 professional retainer (legal/advisory fee, non-refundable).
+-- final_loan_* fields fill in at the day-90+ disbursement stage.
+CREATE TABLE applications (
   id TEXT PRIMARY KEY,
-  lead_id TEXT NOT NULL REFERENCES leads(id),
-  doc_type TEXT NOT NULL,                    -- 'pan' | 'aadhaar_front' | 'aadhaar_back' | 'selfie'
-  cloudinary_public_id TEXT NOT NULL,
-  cloudinary_resource_type TEXT NOT NULL DEFAULT 'image',
-  uploaded_at TEXT NOT NULL DEFAULT (datetime('now'))
+  applicant_id TEXT NOT NULL REFERENCES applicants(id),
+  status TEXT NOT NULL DEFAULT 'account_opened',
+    -- 'account_opened' | 'payment_done' | 'card_received' | 'active'
+  capital_allocation_amount INTEGER NOT NULL DEFAULT 10000,
+  professional_retainer_amount INTEGER NOT NULL DEFAULT 6000,
+  payment_ref TEXT,
+  payment_method TEXT,       -- 'razorpay' | 'cashfree' | 'manual_upi'
+  paid_at INTEGER,
+  card_issued_at INTEGER,
+  final_loan_amount INTEGER,
+  final_loan_disbursed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_kyc_lead ON kyc_documents(lead_id);
 
-CREATE TABLE IF NOT EXISTS agreements (
-  id TEXT PRIMARY KEY,
-  lead_id TEXT NOT NULL REFERENCES leads(id),
-  terms_version TEXT NOT NULL,
-  terms_hash TEXT NOT NULL,
-  signed_name TEXT NOT NULL,
-  ip_address TEXT,
-  user_agent TEXT,
-  signed_at TEXT NOT NULL DEFAULT (datetime('now')),
-  pdf_cloudinary_id TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_agreements_lead ON agreements(lead_id);
+CREATE INDEX idx_applications_applicant ON applications (applicant_id);
 
-CREATE TABLE IF NOT EXISTS status_history (
-  id TEXT PRIMARY KEY,
-  lead_id TEXT NOT NULL REFERENCES leads(id),
-  status TEXT NOT NULL,
-  note TEXT,
-  changed_by TEXT REFERENCES agents(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_status_history_lead ON status_history(lead_id, created_at);
+-- Not modeled yet: the Day 6-45 "cleanup operation" (dispute filing with
+-- bureaus) isn't a table here because how disputes get created and tracked
+-- hasn't been designed — add a `disputes` table when that's specced.

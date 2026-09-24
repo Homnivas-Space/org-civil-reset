@@ -1,155 +1,41 @@
-# Homnivas Civil Reset
+# Homnivas App
 
-Cloudflare Workers (Hono + D1) backend + a Vite/TypeScript PWA frontend. No card
-required anywhere in this stack, no Firebase, no R2.
+Single Cloudflare Worker: static frontend (`/public`) + API (`/api/*`) + D1 + KV — one deploy, one `wrangler.toml`.
 
-Tested in this build: `npm install`, `tsc --noEmit`, the D1 migration, and the full
-happy path (bootstrap agent → login → create lead → magic-link exchange → submit
-application → Cloudinary signature issuance → status history) all ran clean against
-a local `wrangler dev` + local D1. The frontend type-checks and produces a working
-production build (`vite build` → 4.9 kB gzipped JS). Cloudinary's actual upload
-calls and a live Cloudflare deploy need your real credentials/account to test —
-everything up to that boundary is verified.
+## Implemented
 
-## Project layout
+- `POST /api/auth/login/start` — PAN+DOB lookup, sends OTP via email (Resend)
+- `POST /api/auth/login/verify` — OTP check (single-use, 5-attempt limit, 10-min expiry), issues a session cookie
+- `requireAuth` middleware — gates any route behind the session cookie
 
-```
-homnivas-card-pwa/
-  setup.sh              <- guided backend setup (run this first)
-  wrangler.toml
-  migrations/0001_init.sql
-  src/                   <- Worker backend (TypeScript, Hono, D1, Cloudinary)
-  frontend/              <- the PWA (Vite + TypeScript, no framework)
-```
+## Stubbed (return 501, not designed yet)
 
----
+- `POST /api/kyc/submit` — KYC form intake
+- `POST /api/cibil/upload` — CIBIL PDF upload + AI parse
+- `GET /api/dashboard` — CIBIL summary, income/EMI, 4-stage progress tracker
 
-## Part 1 — Backend (Cloudflare Worker)
+## Database
 
-### Option A — guided script
+`migrations/0001_init.sql` — complete schema for everything specced so far: `applicants`, `cibil_reports`, `income_declarations`, `applications` (with the ₹10,000 + ₹6,000 payment split and the 4-stage status). Not modeled: dispute/cleanup tracking — not designed yet.
 
-```
-bash setup.sh
-```
+## First-time setup
 
-Walks you through login, D1 creation, migration, Cloudinary secrets, and deploy,
-in order. You'll need your Cloudinary cloud name/API key/secret ready
-(cloudinary.com dashboard, free tier, no card required).
-
-### Option B — manual steps
-
-```
+```bash
 npm install
-npx wrangler login
-npm run db:create                              # copy the database_id it prints
-# paste that database_id into wrangler.toml under [[d1_databases]]
+wrangler d1 create homnivas-db        # copy the returned database_id into wrangler.toml
+wrangler kv namespace create OTP_KV   # copy the returned id into wrangler.toml
+wrangler secret put JWT_SECRET
+wrangler secret put PAN_PEPPER
+wrangler secret put RESEND_API_KEY
 npm run db:migrate:remote
-npx wrangler secret put CLOUDINARY_API_KEY
-npx wrangler secret put CLOUDINARY_API_SECRET
-# edit wrangler.toml: CLOUDINARY_CLOUD_NAME and PUBLIC_APP_URL
-npm run deploy
 ```
 
-Either way, deploy prints your live API URL — something like
-`https://homnivas-card-pwa.<your-subdomain>.workers.dev`. You'll need it for Part 2.
+Resend also needs a verified sending domain (Resend dashboard → Domains) before `FROM_ADDRESS` in `src/lib/email-otp.ts` will actually deliver — update that address to match your verified domain.
 
-### Set up your first agent — no curl, no Postman
+## Local dev
 
-Once the frontend is deployed (Part 2 below), just open `https://<your-frontend-url>/admin`
-in a browser. It automatically detects whether any agent exists yet:
+Create `.dev.vars` (gitignored) with the three secrets above, then:
 
-- **No agents yet** → shows a one-time setup form (name, phone, PIN) → creates
-  agent #1 and drops you at the login screen.
-- **Agents already exist** → shows the login form directly.
-
-After logging in, the dashboard lets you create a lead (name + phone), get a
-ready-to-tap **WhatsApp Par Bhejein** button with the link pre-filled, and see/update
-every lead's status from a dropdown — all from the browser, no API calls by hand.
-
-**Once your real agents are set up, delete or comment out the `bootstrap-agent`
-route in `src/routes/admin.ts`** (the `/exists` and `/login` routes are safe to
-leave — they require real credentials or reveal nothing sensitive). The
-bootstrap route deliberately has no auth — it's the only way to create agent #1
-before any credentials exist — and it's the one thing in this
-codebase that's an open door if left in.
-
----
-
-## Part 2 — Frontend (the PWA)
-
+```bash
+npm run dev
 ```
-cd frontend
-npm install
-cp .env.example .env
-# edit .env — set VITE_API_BASE_URL to your deployed Worker URL from Part 1
-npm run build
-```
-
-This produces `frontend/dist/` — a handful of static files (HTML/CSS/JS + PWA
-manifest + service worker), 6.3 kB of JS gzipped, including the `/admin` panel.
-
-### Deploying dist/ — this IS a real drag-and-drop zip upload
-
-Unlike the backend, static output genuinely can go up as a zip through the
-Cloudflare dashboard:
-
-1. Cloudflare Dashboard → Workers & Pages → Create → Pages → **Upload assets**
-2. Drag in the contents of `frontend/dist/`
-3. Done — you get a `*.pages.dev` URL immediately, or attach your own domain
-   under Custom Domains
-
-Every time you change the frontend: `npm run build`, then re-upload `dist/` the
-same way (or connect Pages to a GitHub repo instead, so it redeploys on every push
-— see "Going further" below).
-
-### One thing to update before this is real
-
-`src/routes/admin.ts` builds the WhatsApp link using `PUBLIC_APP_URL` from
-`wrangler.toml` — set that to wherever you land your Pages deployment
-(`https://your-app.pages.dev` or your custom domain), then redeploy the backend
-so new leads get the right link.
-
----
-
-## Going further — Git-connected auto-deploy
-
-Once you're past manual testing, connecting both halves to GitHub means every
-`git push` redeploys automatically — no more re-running `wrangler deploy` or
-re-uploading `dist/` by hand:
-
-- **Backend:** Cloudflare Dashboard → Workers & Pages → your Worker → Settings →
-  Builds → connect your GitHub repo
-- **Frontend:** Cloudflare Dashboard → Workers & Pages → Create → Pages →
-  **Connect to Git** instead of Upload assets — point it at `frontend/`, build
-  command `npm run build`, output directory `dist`
-
----
-
-## What's deliberately NOT in this codebase yet
-
-- **Signed Cloudinary delivery URLs.** Uploads use `type: authenticated` so
-  nothing is publicly guessable, but generating a working signed URL to actually
-  *view* a file later uses a different signing scheme than the upload signature in
-  `src/lib/cloudinary.ts` (which IS the standard documented formula and is safe).
-  Wire real delivery signing against Cloudinary's current docs before any agent
-  needs to view an uploaded KYC document.
-- **Real terms text.** `frontend/src/screens/agreement.ts` has a placeholder
-  `TERMS_TEXT` clearly marked as such. Replace it with your actual,
-  lawyer-reviewed terms before anyone signs against it — and bump
-  `TERMS_VERSION` instead of editing the text in place once real customers have
-  signed, since the exact text is hashed and permanently tied to their signature.
-- **Real app icon.** `frontend/public/icons/icon.svg` is a plain placeholder.
-- **Input validation.** Route handlers cast JSON bodies to a TypeScript type but
-  don't verify shape at runtime. Add `zod` before this sees real traffic.
-- **D1 backups.** Set up a scheduled export before you have agreements you can't
-  afford to lose.
-- **Rate limiting** on `/api/admin/login`.
-
-## What's genuinely done
-
-Full agent → WhatsApp handoff → magic-link → application form → camera KYC
-capture → digital agreement (scroll-gated consent + signature pad) → live status
-tracker, backend and frontend both, tested end to end where the sandbox allows it.
-An `/admin` panel (setup → login → create-lead-with-WhatsApp-button → status
-management) replaces raw API calls for everyday agent use — Postman/curl is only
-ever needed if you're debugging, not for normal operation.

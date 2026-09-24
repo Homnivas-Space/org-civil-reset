@@ -1,36 +1,29 @@
-import type { MiddlewareHandler } from 'hono';
-import type { Bindings } from '../types';
-import { getLeadBySession } from '../lib/db';
+import type { MiddlewareHandler } from "hono";
+import { getCookie } from "hono/cookie";
+import { verify } from "hono/jwt";
 
-type AgentEnv = { Bindings: Bindings; Variables: { agentId: string } };
-type LeadEnv = { Bindings: Bindings; Variables: { leadId: string } };
-
-function bearerToken(header: string | undefined): string {
-  return (header ?? '').replace(/^Bearer\s+/i, '').trim();
-}
-
-export const requireAgent: MiddlewareHandler<AgentEnv> = async (c, next) => {
-  const token = bearerToken(c.req.header('Authorization'));
-  if (!token) return c.json({ error: 'missing_token' }, 401);
-
-  const session = await c.env.DB
-    .prepare("SELECT agent_id FROM agent_sessions WHERE token = ? AND expires_at > datetime('now')")
-    .bind(token)
-    .first<{ agent_id: string }>();
-
-  if (!session) return c.json({ error: 'invalid_or_expired_session' }, 401);
-
-  c.set('agentId', session.agent_id);
-  await next();
+type Env = {
+  Bindings: { JWT_SECRET: string };
+  Variables: { applicantId: string };
 };
 
-export const requireLead: MiddlewareHandler<LeadEnv> = async (c, next) => {
-  const token = bearerToken(c.req.header('Authorization'));
-  if (!token) return c.json({ error: 'missing_session' }, 401);
+/**
+ * Protects a route behind the "session" cookie set at login.
+ * On success, c.get("applicantId") is available to downstream handlers.
+ * Usage: app.get("/dashboard", requireAuth, (c) => { ... })
+ */
+export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
+  const token = getCookie(c, "session");
+  if (!token) {
+    return c.json({ error: "Not authenticated" }, 401);
+  }
 
-  const lead = await getLeadBySession(c.env.DB, token);
-  if (!lead) return c.json({ error: 'invalid_or_expired_session' }, 401);
+  try {
+    const payload = await verify(token, c.env.JWT_SECRET);
+    c.set("applicantId", payload.sub as string);
+  } catch {
+    return c.json({ error: "Session expired, please log in again" }, 401);
+  }
 
-  c.set('leadId', (lead as { id: string }).id);
   await next();
 };

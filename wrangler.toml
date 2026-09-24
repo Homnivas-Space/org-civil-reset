@@ -1,18 +1,24 @@
-name = "homnivas-card-pwa"
+name = "homnivas-app"
 main = "src/index.ts"
-compatibility_date = "2026-09-01"
-compatibility_flags = ["nodejs_compat"]
+compatibility_date = "2026-09-24"
+
+# One project: static frontend + API + D1 + KV, one deploy.
+# /api/* always hits the Worker (run_worker_first); everything else tries
+# a static file first, falling back to index.html for client-side routes.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "homnivas_civil_reset"
-database_id = "777f50a8-3017-498f-a3e6-5b3ad492b74e"
+database_name = "homnivas-db"
+database_id = "311f50ef-07c3-4110-8ede-90f882fef0cb"
 
-[vars]
-CLOUDINARY_CLOUD_NAME = "xbebhkge"
-PUBLIC_APP_URL = "https://app.homnivas.space"
-ALLOWED_ORIGINS = "https://app.homnivas.space"
+[[kv_namespaces]]
+binding = "OTP_KV"
+id = "adec884dd26a42549bf8971452361c67"
 
-# Secrets — never put these in this file. Set with:
-#   wrangler secret put CLOUDINARY_API_KEY
-#   wrangler secret put CLOUDINARY_API_SECRET
+# Secrets (JWT_SECRET, PAN_PEPPER, RESEND_API_KEY) are NOT set here — see
+# the deploy steps / README.

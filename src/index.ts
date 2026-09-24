@@ -1,44 +1,27 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import type { Bindings } from './types';
-import admin from './routes/admin';
-import lead from './routes/lead';
-import application from './routes/application';
-import kyc from './routes/kyc';
-import agreement from './routes/agreement';
-import status from './routes/status';
+import { Hono } from "hono";
+import auth from "./routes/auth";
+import kyc from "./routes/kyc";
+import cibil from "./routes/cibil";
+import dashboard from "./routes/dashboard";
+
+type Bindings = {
+  DB: D1Database;
+  OTP_KV: KVNamespace;
+  ASSETS: Fetcher;
+  JWT_SECRET: string;
+  PAN_PEPPER: string;
+  RESEND_API_KEY: string;
+};
 
 const app = new Hono<{ Bindings: Bindings }>();
 
-// Frontend and backend live on different domains by design (Pages + Workers),
-// so every browser call here is cross-origin — without this, the browser
-// blocks all of it before your route code ever runs. ALLOWED_ORIGINS is a
-// comma-separated list set in wrangler.toml; *.pages.dev is always allowed
-// too, so Cloudflare's preview-deployment URLs work during testing without
-// needing to be listed by hand.
-app.use(
-  '*',
-  cors({
-    origin: (origin, c) => {
-      const allowed = (c.env.ALLOWED_ORIGINS ?? '')
-        .split(',')
-        .map((o: string) => o.trim())
-        .filter(Boolean);
-      if (allowed.includes(origin) || origin.endsWith('.pages.dev')) return origin;
-      return allowed[0] ?? '';
-    },
-    allowMethods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
-    allowHeaders: ['Content-Type', 'Authorization'],
-  })
-);
+app.route("/api/auth", auth);
+app.route("/api/kyc", kyc);
+app.route("/api/cibil", cibil);
+app.route("/api/dashboard", dashboard);
 
-app.get('/', (c) => c.json({ ok: true, service: 'homnivas-card-pwa-api' }));
-
-app.route('/api/admin', admin);
-app.route('/api/lead', lead);
-app.route('/api/application', application);
-app.route('/api/kyc', kyc);
-app.route('/api/agreement', agreement);
-app.route('/api/status', status);
+// Everything else (anything not under /api/*) is served by the platform
+// from ./public per wrangler.toml — this Worker never sees those requests
+// unless run_worker_first is widened later.
 
 export default app;
