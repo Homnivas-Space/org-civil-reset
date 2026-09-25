@@ -38,7 +38,11 @@ wrangler secret put OPENROUTER_API_KEY
 npm run db:migrate:remote
 ```
 
-## Local dev
+## Debugging
+
+Every response includes a `requestId` when something fails — the frontend shows it as `(ref: xxxxxxxx)`. To find what actually happened: Cloudflare dashboard → the Worker → **Logs** tab, or `npx wrangler tail` for a live stream while you reproduce it. Search/filter by that ref. Every request is also logged on completion (method, path, status, duration), so a spike in 500s or slow requests is visible even without a specific ref to search for.
+
+
 
 Create `.dev.vars` (gitignored) with the four secrets above, then:
 

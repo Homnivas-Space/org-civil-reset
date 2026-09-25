@@ -4,6 +4,7 @@ import { sign } from "hono/jwt";
 import { createOtp, verifyOtp } from "../lib/otp";
 import { sendOtpEmail } from "../lib/email-otp";
 import { hashPanDob } from "../lib/pan";
+import { logError } from "../lib/logger";
 
 type Bindings = {
   DB: D1Database;
@@ -12,26 +13,34 @@ type Bindings = {
   PAN_PEPPER: string;
   RESEND_API_KEY: string;
 };
+type Variables = { requestId: string };
 
-const auth = new Hono<{ Bindings: Bindings }>();
+const auth = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 const SESSION_TTL_SECONDS = 30 * 60; // 30 min
 
 // Step 1: PAN + DOB -> look up applicant, send OTP to their registered email.
 auth.post("/login/start", async (c) => {
+  const requestId = c.get("requestId");
   const { pan, dob } = await c.req.json<{ pan?: string; dob?: string }>();
 
   if (!pan || !dob) {
-    return c.json({ error: "pan and dob are required" }, 400);
+    return c.json({ error: "pan and dob are required", requestId }, 400);
   }
 
   const hash = await hashPanDob(pan.trim().toUpperCase(), dob, c.env.PAN_PEPPER);
 
-  const applicant = await c.env.DB.prepare(
-    "SELECT id, email FROM applicants WHERE pan_dob_hash = ?"
-  )
-    .bind(hash)
-    .first<{ id: string; email: string }>();
+  let applicant: { id: string; email: string } | null;
+  try {
+    applicant = await c.env.DB.prepare(
+      "SELECT id, email FROM applicants WHERE pan_dob_hash = ?"
+    )
+      .bind(hash)
+      .first<{ id: string; email: string }>();
+  } catch (err) {
+    logError("login_start_db_lookup_failed", err, { requestId });
+    return c.json({ error: "Could not check your details, try again", requestId }, 500);
+  }
 
   // Same response whether or not the applicant exists — don't let this
   // endpoint be used to confirm which PANs are registered.
@@ -43,8 +52,8 @@ auth.post("/login/start", async (c) => {
   const result = await sendOtpEmail(c.env, applicant.email, otp);
 
   if (!result.ok) {
-    console.error(result.error);
-    return c.json({ error: "Could not send the code, try again" }, 502);
+    logError("login_start_email_send_failed", new Error(result.error), { requestId });
+    return c.json({ error: "Could not send the code, try again", requestId }, 502);
   }
 
   return c.json({ ok: true, applicantId: applicant.id });
@@ -52,13 +61,14 @@ auth.post("/login/start", async (c) => {
 
 // Step 2: OTP -> verify, issue session cookie.
 auth.post("/login/verify", async (c) => {
+  const requestId = c.get("requestId");
   const { applicantId, otp } = await c.req.json<{
     applicantId?: string;
     otp?: string;
   }>();
 
   if (!applicantId || !otp) {
-    return c.json({ error: "applicantId and otp are required" }, 400);
+    return c.json({ error: "applicantId and otp are required", requestId }, 400);
   }
 
   const result = await verifyOtp(c.env.OTP_KV, applicantId, otp.trim());
@@ -69,7 +79,7 @@ auth.post("/login/verify", async (c) => {
       expired: "Code expired — request a new one",
       too_many_attempts: "Too many attempts — request a new code",
     };
-    return c.json({ error: messages[result] ?? "Verification failed" }, 401);
+    return c.json({ error: messages[result] ?? "Verification failed", requestId }, 401);
   }
 
   const now = Math.floor(Date.now() / 1000);

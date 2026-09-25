@@ -2,13 +2,14 @@ import { Hono } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { extractPdfText } from "../lib/pdf-text";
 import { chatCompletion } from "../lib/openrouter";
+import { logError } from "../lib/logger";
 
 type Bindings = {
   DB: D1Database;
   JWT_SECRET: string;
   OPENROUTER_API_KEY: string;
 };
-type Variables = { applicantId: string };
+type Variables = { applicantId: string; requestId: string };
 
 const cibil = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 cibil.use("*", requireAuth);
@@ -36,10 +37,11 @@ If a field truly cannot be found, use null (or false for the boolean) — never 
 // extractor here, not a narrator over deterministic parsing, because we
 // have no real sample report to build a reliable parser against yet.
 cibil.post("/upload", async (c) => {
+  const requestId = c.get("requestId");
   const contentType = c.req.header("content-type") ?? "";
   if (!contentType.includes("pdf")) {
     return c.json(
-      { error: "Send the PDF as the raw request body with Content-Type: application/pdf" },
+      { error: "Send the PDF as the raw request body with Content-Type: application/pdf", requestId },
       400
     );
   }
@@ -48,23 +50,23 @@ cibil.post("/upload", async (c) => {
   const bytes = await c.req.arrayBuffer();
 
   if (bytes.byteLength === 0) {
-    return c.json({ error: "Empty file" }, 400);
+    return c.json({ error: "Empty file", requestId }, 400);
   }
 
   let text: string;
   try {
     text = await extractPdfText(bytes);
   } catch (err) {
-    console.error(err);
+    logError("cibil_pdf_extract_failed", err, { requestId, applicantId });
     return c.json(
-      { error: "Could not read this PDF — it may be a scanned image rather than text" },
+      { error: "Could not read this PDF — it may be a scanned image rather than text", requestId },
       422
     );
   }
 
   if (text.trim().length < 50) {
     return c.json(
-      { error: "No readable text found — scanned/image-only PDFs aren't supported yet" },
+      { error: "No readable text found — scanned/image-only PDFs aren't supported yet", requestId },
       422
     );
   }
@@ -75,11 +77,15 @@ cibil.post("/upload", async (c) => {
 
   const result = await chatCompletion(c.env, SYSTEM_PROMPT, truncated);
   if (!result.ok) {
-    console.error(result.error);
+    logError("cibil_ai_parse_failed", new Error(result.error), {
+      requestId,
+      applicantId,
+      status: result.status,
+    });
     if (result.status === 429) {
-      return c.json({ error: "AI parsing is rate-limited right now, try again shortly" }, 429);
+      return c.json({ error: "AI parsing is rate-limited right now, try again shortly", requestId }, 429);
     }
-    return c.json({ error: "Could not parse this report, try again" }, 502);
+    return c.json({ error: "Could not parse this report, try again", requestId }, 502);
   }
 
   let parsed: {
@@ -94,32 +100,41 @@ cibil.post("/upload", async (c) => {
   try {
     const cleaned = result.content.trim().replace(/^```(json)?\s*|\s*```$/g, "");
     parsed = JSON.parse(cleaned);
-  } catch {
-    console.error("Bad JSON from model:", result.content);
-    return c.json({ error: "AI returned an unreadable response, try again" }, 502);
+  } catch (err) {
+    logError("cibil_ai_response_unparseable", err, {
+      requestId,
+      applicantId,
+      rawContent: result.content.slice(0, 500),
+    });
+    return c.json({ error: "AI returned an unreadable response, try again", requestId }, 502);
   }
 
   const reportId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
-  await c.env.DB.prepare(
-    `INSERT INTO cibil_reports
-      (id, applicant_id, report_date, score, active_loans, overdue_count, inquiries_last_6m, has_writeoff_or_settled, ai_summary, parsed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      reportId,
-      applicantId,
-      parsed.report_date,
-      parsed.score,
-      parsed.active_loans,
-      parsed.overdue_count,
-      parsed.inquiries_last_6m,
-      parsed.has_writeoff_or_settled ? 1 : 0,
-      parsed.summary,
-      now
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO cibil_reports
+        (id, applicant_id, report_date, score, active_loans, overdue_count, inquiries_last_6m, has_writeoff_or_settled, ai_summary, parsed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run();
+      .bind(
+        reportId,
+        applicantId,
+        parsed.report_date,
+        parsed.score,
+        parsed.active_loans,
+        parsed.overdue_count,
+        parsed.inquiries_last_6m,
+        parsed.has_writeoff_or_settled ? 1 : 0,
+        parsed.summary,
+        now
+      )
+      .run();
+  } catch (err) {
+    logError("cibil_report_db_write_failed", err, { requestId, applicantId });
+    return c.json({ error: "Parsed successfully but could not save the result, try again", requestId }, 500);
+  }
 
   // The PDF bytes and the extracted text both go out of scope when this
   // request ends — neither is ever written anywhere, per the no-storage decision.

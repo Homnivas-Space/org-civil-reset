@@ -29,7 +29,9 @@ async function api(path, options = {}) {
     /* no body */
   }
   if (!res.ok) {
-    throw new Error((data && data.error) || `Request failed (${res.status})`);
+    const base = (data && data.error) || `Request failed (${res.status})`;
+    const ref = data && data.requestId ? ` (ref: ${data.requestId})` : "";
+    throw new Error(base + ref);
   }
   return data;
 }

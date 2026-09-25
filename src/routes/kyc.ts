@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { hashPanDob } from "../lib/pan";
 import { createOtp } from "../lib/otp";
 import { sendOtpEmail } from "../lib/email-otp";
+import { logError } from "../lib/logger";
 
 type Bindings = {
   DB: D1Database;
@@ -9,8 +10,9 @@ type Bindings = {
   OTP_KV: KVNamespace;
   RESEND_API_KEY: string;
 };
+type Variables = { requestId: string };
 
-const kyc = new Hono<{ Bindings: Bindings }>();
+const kyc = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 
 function maskPan(pan: string): string {
   const clean = pan.trim().toUpperCase();
@@ -31,15 +33,14 @@ interface KycBody {
 }
 
 // Typed-field intake only — no document photos, no selfie, no payment.
-// On success, immediately sends the login OTP so a new applicant flows
-// straight into verification instead of re-entering PAN+DOB right after
-// just submitting it.
+// On success, immediately sends the login OTP.
 kyc.post("/submit", async (c) => {
+  const requestId = c.get("requestId");
   const body = await c.req.json<KycBody>();
   const { name, email, dob, pan, aadhaar, mobile } = body;
 
   if (!name || !email || !dob || !pan) {
-    return c.json({ error: "name, email, dob, and pan are required" }, 400);
+    return c.json({ error: "name, email, dob, and pan are required", requestId }, 400);
   }
 
   const cleanPan = pan.trim().toUpperCase();
@@ -71,9 +72,12 @@ kyc.post("/submit", async (c) => {
       ).bind(crypto.randomUUID(), applicantId, now, now),
     ]);
   } catch (err) {
-    console.error(err);
+    // Most likely: UNIQUE constraint on pan_dob_hash or email. Could also
+    // be a genuine DB error — logged either way so the two aren't confused
+    // if this starts happening a lot.
+    logError("kyc_submit_db_write_failed", err, { requestId });
     return c.json(
-      { error: "An application already exists for this PAN or email" },
+      { error: "An application already exists for this PAN or email", requestId },
       409
     );
   }
@@ -81,7 +85,7 @@ kyc.post("/submit", async (c) => {
   const otp = await createOtp(c.env.OTP_KV, applicantId);
   const sendResult = await sendOtpEmail(c.env, cleanEmail, otp);
   if (!sendResult.ok) {
-    console.error(sendResult.error);
+    logError("kyc_submit_otp_email_failed", new Error(sendResult.error), { requestId });
     // The applicant record exists either way — don't fail signup over a
     // delivery hiccup, the frontend can offer "resend code."
     return c.json({ ok: true, applicantId, otpSent: false });
