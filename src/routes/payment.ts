@@ -1,18 +1,21 @@
 import { Hono } from "hono";
 import { requireAuth } from "../middleware/auth";
 import { sendEmail } from "../lib/email";
+import { logError } from "../lib/logger";
 
 type Bindings = { DB: D1Database; JWT_SECRET: string; RESEND_API_KEY: string };
-type Variables = { applicantId: string };
+type Variables = { applicantId: string; requestId: string };
 
 const payment = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 payment.use("*", requireAuth);
 
-// TODO: replace with your real UPI VPA and ops inbox.
+// TODO: replace with your real UPI VPA and ops inbox before this goes live —
+// as shipped, a real payer's UTR gets emailed to a placeholder address.
 const UPI_ID = "homnivas@upi";
 const OPS_EMAIL = "ops@homnivas.space";
 
 payment.get("/info", async (c) => {
+  const requestId = c.get("requestId");
   const applicantId = c.get("applicantId");
   const application = await c.env.DB.prepare(
     `SELECT capital_allocation_amount, professional_retainer_amount, status
@@ -26,7 +29,7 @@ payment.get("/info", async (c) => {
     }>();
 
   if (!application) {
-    return c.json({ error: "No application found" }, 404);
+    return c.json({ error: "No application found", requestId }, 404);
   }
 
   return c.json({
@@ -42,17 +45,18 @@ interface SubmitBody {
   utr?: string;
 }
 
-// Manual reconciliation, on purpose — see the note in the chat: Razorpay/
-// Cashfree both gate on business-merchant verification, the same category
-// of friction as the WhatsApp Business Platform you ruled out. This needs
-// nothing but a UPI ID. The ops notification below includes the exact SQL
-// to run in the D1 Console to confirm — no admin panel built for this yet.
+// Manual reconciliation, on purpose — Razorpay/Cashfree both gate on
+// business-merchant verification, the same category of friction as the
+// WhatsApp Business Platform already ruled out. This needs nothing but a
+// UPI ID. The ops notification includes the exact SQL to run in the D1
+// Console to confirm — no admin panel built for this yet.
 payment.post("/submit", async (c) => {
+  const requestId = c.get("requestId");
   const applicantId = c.get("applicantId");
   const { utr } = await c.req.json<SubmitBody>();
 
   if (!utr || utr.trim().length < 4) {
-    return c.json({ error: "utr (the UPI transaction reference) is required" }, 400);
+    return c.json({ error: "utr (the UPI transaction reference) is required", requestId }, 400);
   }
 
   const application = await c.env.DB.prepare(
@@ -62,7 +66,7 @@ payment.post("/submit", async (c) => {
     .first<{ id: string }>();
 
   if (!application) {
-    return c.json({ error: "No application found" }, 404);
+    return c.json({ error: "No application found", requestId }, 404);
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -90,9 +94,10 @@ payment.post("/submit", async (c) => {
            <pre>UPDATE applications SET status='payment_done', paid_at=${now} WHERE id='${application.id}';</pre>`,
   });
   if (!notifyResult.ok) {
-    console.error(notifyResult.error);
+    logError("payment_ops_notify_failed", new Error(notifyResult.error), { requestId, applicantId });
     // The applicant's submission is saved regardless — don't fail their
-    // request over a notification hiccup.
+    // request over a notification hiccup, but this means you won't get
+    // pinged and need to check D1 directly if this keeps happening.
   }
 
   return c.json({ ok: true, status: "payment_submitted" });

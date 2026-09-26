@@ -9,6 +9,8 @@ const state = {
   applicantId: null,
   error: null,
   dashboard: null,
+  paymentInfo: null,
+  docStatus: {},
 };
 
 function setState(patch) {
@@ -34,6 +36,15 @@ async function api(path, options = {}) {
     throw new Error(base + ref);
   }
   return data;
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 // --- navigation -------------------------------------------------------
@@ -64,6 +75,18 @@ function showUpload() {
 }
 function showIncome() {
   setState({ screen: "income-form", error: null });
+}
+async function showPayment() {
+  setState({ screen: "payment", error: null, paymentInfo: null });
+  try {
+    const data = await api("/api/payment/info");
+    setState({ paymentInfo: data });
+  } catch (err) {
+    setState({ error: err.message });
+  }
+}
+function showDocuments() {
+  setState({ screen: "documents", error: null });
 }
 
 // --- actions ------------------------------------------------------------
@@ -153,6 +176,38 @@ async function submitIncome(form) {
       }),
     });
     await showDashboard();
+  } catch (err) {
+    setState({ error: err.message });
+  }
+}
+
+async function submitPayment(form) {
+  const fd = new FormData(form);
+  try {
+    await api("/api/payment/submit", {
+      method: "POST",
+      body: JSON.stringify({ utr: fd.get("utr") }),
+    });
+    await showDashboard();
+  } catch (err) {
+    setState({ error: err.message });
+  }
+}
+
+async function submitDocument(kind, inputId) {
+  const input = document.getElementById(inputId);
+  const file = input && input.files[0];
+  if (!file) {
+    setState({ error: `Choose a file for ${kind} first` });
+    return;
+  }
+  try {
+    const contentBase64 = await fileToBase64(file);
+    await api("/api/documents/upload", {
+      method: "POST",
+      body: JSON.stringify({ kind, filename: file.name, contentBase64 }),
+    });
+    setState({ error: null, docStatus: { ...state.docStatus, [kind]: true } });
   } catch (err) {
     setState({ error: err.message });
   }
@@ -253,12 +308,24 @@ function screenOtp() {
   `;
 }
 
+// Maps every real status value to a visual position across the 4 circles
+// shown (Account / Payment / Card / Active). payment_submitted sits at the
+// same circle as payment_done but as "current" (pending), not "done" —
+// without this, a submitted-but-unconfirmed payment showed a blank tracker.
+const STATUS_STEP_INDEX = {
+  account_opened: 0,
+  payment_submitted: 1,
+  payment_done: 2,
+  card_received: 3,
+  active: 4,
+};
+
 function stepTrackerHtml(currentIdx) {
   const stages = [
-    { key: "account_opened", label: "Account" },
-    { key: "payment_done", label: "Payment" },
-    { key: "card_received", label: "Card" },
-    { key: "active", label: "Active" },
+    { label: "Account" },
+    { label: "Payment" },
+    { label: "Card" },
+    { label: "Active" },
   ];
   return stages
     .map((stage, i) => {
@@ -273,13 +340,45 @@ function stepTrackerHtml(currentIdx) {
     .join("");
 }
 
+function paymentCardHtml(application) {
+  if (!application) return "";
+  if (application.status === "account_opened") {
+    return `
+      <div class="card">
+        <div class="card-title">Payment</div>
+        <p class="sub" style="margin-bottom:0">₹16,000 to open your account and activate your card.</p>
+        <button onclick="showPayment()">Pay now</button>
+      </div>`;
+  }
+  if (application.status === "payment_submitted") {
+    return `
+      <div class="card">
+        <div class="card-title">Payment</div>
+        <p class="sub" style="margin-bottom:0">Reference <strong>${escapeHtml(application.payment_ref ?? "")}</strong> submitted — awaiting confirmation.</p>
+      </div>`;
+  }
+  return `
+    <div class="card">
+      <div class="card-title">Payment</div>
+      <div class="check-row"><span class="tick">✓</span><span class="k">Status</span><span class="v">Confirmed</span></div>
+    </div>`;
+}
+
+function documentsCardHtml() {
+  return `
+    <div class="card">
+      <div class="card-title">KYC documents</div>
+      <p class="sub" style="margin-bottom:0">PAN, Aadhaar, and a selfie for verification.</p>
+      <button class="secondary" onclick="showDocuments()">Upload documents</button>
+    </div>`;
+}
+
 function screenDashboard() {
   if (!state.dashboard) {
     return `<div class="screen"><h1>Loading…</h1>${errorHtml()}</div>`;
   }
   const { applicant, cibilReport, income, application } = state.dashboard;
-  const stageKeys = ["account_opened", "payment_done", "card_received", "active"];
-  const currentIdx = application ? stageKeys.indexOf(application.status) : -1;
+  const currentIdx = application ? STATUS_STEP_INDEX[application.status] ?? -1 : -1;
 
   return `
     <div class="screen">
@@ -291,6 +390,9 @@ function screenDashboard() {
         <div class="card-title">Progress</div>
         <div class="steps">${stepTrackerHtml(currentIdx)}</div>
       </div>
+
+      ${paymentCardHtml(application)}
+      ${documentsCardHtml()}
 
       <div class="card">
         <div class="card-title">CIBIL report</div>
@@ -370,6 +472,70 @@ function screenIncome() {
   `;
 }
 
+function screenPayment() {
+  if (!state.paymentInfo) {
+    return `<div class="screen"><h1>Loading…</h1>${errorHtml()}</div>`;
+  }
+  const p = state.paymentInfo;
+  return `
+    <div class="screen">
+      <div class="eyebrow">Step 2 of 4</div>
+      <h1>Complete your payment</h1>
+      <p class="sub">Pay via UPI, then submit the transaction reference below.</p>
+
+      <div class="card-dark">
+        <div class="card-title">Amount</div>
+        <div class="check-row"><span class="tick">✓</span><span class="k">Capital allocation</span><span class="v">₹${p.capitalAllocation}</span></div>
+        <div class="check-row"><span class="tick">✓</span><span class="k">Professional retainer</span><span class="v">₹${p.professionalRetainer}</span></div>
+        <div class="check-row"><span class="tick">✓</span><span class="k">Total</span><span class="v">₹${p.total}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Pay to this UPI ID</div>
+        <p style="font-size:19px;font-weight:800;letter-spacing:-0.01em;margin:0 0 6px;">${escapeHtml(p.upiId)}</p>
+        <p class="sub" style="margin-bottom:0">Open any UPI app, pay ₹${p.total} to the ID above, then enter the transaction reference (UTR) below.</p>
+      </div>
+
+      <div class="card">
+        <form id="paymentForm">
+          <label>UPI transaction reference (UTR)</label>
+          <input name="utr" required minlength="4" />
+          <button type="submit">Submit payment reference</button>
+        </form>
+        ${errorHtml()}
+      </div>
+      <button class="link" onclick="showDashboard()">Back</button>
+    </div>
+  `;
+}
+
+function screenDocuments() {
+  const ds = state.docStatus || {};
+  const row = (kind, label, inputId) => `
+    <div style="margin-bottom:20px;">
+      <label>${label}</label>
+      <input type="file" id="${inputId}" accept="image/*,application/pdf" />
+      <button class="secondary" onclick="submitDocument('${kind}','${inputId}')">${
+        ds[kind] ? "Sent ✓ — send again" : "Send"
+      }</button>
+    </div>
+  `;
+  return `
+    <div class="screen">
+      <div class="eyebrow">KYC documents</div>
+      <h1>Upload your documents</h1>
+      <p class="sub">Sent straight to our verification team for manual review.</p>
+      <div class="card">
+        ${row("pan", "PAN card photo", "panFile")}
+        ${row("aadhaar", "Aadhaar card photo", "aadhaarFile")}
+        ${row("selfie", "Selfie", "selfieFile")}
+        ${errorHtml()}
+      </div>
+      <button class="link" onclick="showDashboard()">Back</button>
+    </div>
+  `;
+}
+
 function render() {
   const root = document.getElementById("app");
   const screens = {
@@ -380,6 +546,8 @@ function render() {
     dashboard: screenDashboard,
     "upload-cibil": screenUpload,
     "income-form": screenIncome,
+    payment: screenPayment,
+    documents: screenDocuments,
   };
   root.innerHTML = (screens[state.screen] || screenStart)();
 
@@ -394,6 +562,9 @@ function render() {
 
   const incomeForm = document.getElementById("incomeForm");
   if (incomeForm) incomeForm.addEventListener("submit", (e) => { e.preventDefault(); submitIncome(incomeForm); });
+
+  const paymentForm = document.getElementById("paymentForm");
+  if (paymentForm) paymentForm.addEventListener("submit", (e) => { e.preventDefault(); submitPayment(paymentForm); });
 }
 
 render();

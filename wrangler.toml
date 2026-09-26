@@ -20,5 +20,12 @@ database_id = "311f50ef-07c3-4110-8ede-90f882fef0cb"
 binding = "OTP_KV"
 id = "adec884dd26a42549bf8971452361c67"
 
-# Secrets (JWT_SECRET, PAN_PEPPER, RESEND_API_KEY) are NOT set here — see
-# the deploy steps / README.
+# Persists structured logs (console.log/error) to the dashboard, searchable
+# by field — without this, console.error output goes nowhere you can see
+# after the fact. head_sampling_rate = 1 means log every request, not a sample.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Secrets (JWT_SECRET, PAN_PEPPER, RESEND_API_KEY, OPENROUTER_API_KEY) are
+# NOT set here — see the deploy steps / README.

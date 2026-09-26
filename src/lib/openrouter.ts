@@ -19,21 +19,30 @@ export async function chatCompletion(
   systemPrompt: string,
   userPrompt: string
 ): Promise<ChatResult> {
-  const res = await fetch(OPENROUTER_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: FREE_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      temperature: 0,
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(OPENROUTER_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: FREE_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        temperature: 0,
+      }),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      error: `OpenRouter network error: ${err instanceof Error ? err.message : String(err)}`,
+      status: 0,
+    };
+  }
 
   if (!res.ok) {
     const body = await res.text();

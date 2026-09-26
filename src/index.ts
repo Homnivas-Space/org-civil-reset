@@ -5,6 +5,8 @@ import kyc from "./routes/kyc";
 import cibil from "./routes/cibil";
 import income from "./routes/income";
 import dashboard from "./routes/dashboard";
+import documents from "./routes/documents";
+import payment from "./routes/payment";
 
 type Bindings = {
   DB: D1Database;
@@ -42,6 +44,8 @@ app.route("/api/kyc", kyc);
 app.route("/api/cibil", cibil);
 app.route("/api/income", income);
 app.route("/api/dashboard", dashboard);
+app.route("/api/documents", documents);
+app.route("/api/payment", payment);
 
 // Catches anything thrown by any route that wasn't already handled.
 // Before this, an unhandled error (a bad D1 query, a missing binding, an

@@ -19,20 +19,32 @@ export async function sendEmail(
   env: EmailEnv,
   opts: { to: string; subject: string; html: string; attachments?: Attachment[] }
 ): Promise<SendResult> {
-  const res = await fetch(RESEND_API_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: FROM_ADDRESS,
-      to: [opts.to],
-      subject: opts.subject,
-      html: opts.html,
-      ...(opts.attachments ? { attachments: opts.attachments } : {}),
-    }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(RESEND_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: FROM_ADDRESS,
+        to: [opts.to],
+        subject: opts.subject,
+        html: opts.html,
+        ...(opts.attachments ? { attachments: opts.attachments } : {}),
+      }),
+    });
+  } catch (err) {
+    // fetch() throws on network-level failures (DNS, connection refused,
+    // TLS) — distinct from a bad HTTP status, which is handled below.
+    // Previously this was unguarded, so a network blip here became an
+    // uncaught exception all the way up to the global error handler.
+    return {
+      ok: false,
+      error: `Resend network error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
   if (!res.ok) {
     const body = await res.text();
